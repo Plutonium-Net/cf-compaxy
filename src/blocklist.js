@@ -1,8 +1,9 @@
 // Domain blocklist.
 //
 // Each entry names one or more domains and the message the proxy shows when a
-// request tries to reach them. Edit BLOCKLIST below, or point COMPAXY_BLOCKLIST
-// at a JSON file with the same shape (an array of { domains, message }).
+// request tries to reach them. Edit BLOCKLIST below, or set a BLOCKLIST variable
+// on the Worker to a JSON array with the same shape (an array of
+// { domains, message }).
 //
 // Matching rules:
 //
@@ -14,8 +15,6 @@
 //
 // The message is rendered as plain text inside the block page, so it does not
 // need escaping and cannot inject markup.
-
-import fs from "node:fs";
 
 // Domains to block, each with the message the proxy shows instead of the site.
 // A bare domain covers its subdomains too; "*.example.com" covers subdomains
@@ -46,23 +45,36 @@ function compile(entries) {
   return matchers;
 }
 
-// Optional override: a JSON file whose path is in COMPAXY_BLOCKLIST. A broken
-// or missing file is reported and the built-in list is used instead, so a bad
-// config can never take the whole proxy down.
-function loadEntries() {
-  const file = process.env.COMPAXY_BLOCKLIST;
-  if (!file) return BLOCKLIST;
+/**
+ * A JSON array from the Worker's BLOCKLIST variable, or the built-in list when
+ * unset. A broken value is reported and the built-in list is used instead, so a
+ * bad config can never take the whole proxy down.
+ */
+function parseEntries(raw) {
+  if (!raw) return BLOCKLIST;
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    const parsed = JSON.parse(String(raw));
     if (Array.isArray(parsed)) return parsed;
-    console.error(`Blocklist ${file} must be a JSON array; ignoring it.`);
+    console.error("BLOCKLIST must be a JSON array; ignoring it.");
   } catch (error) {
-    console.error(`Could not read blocklist ${file}: ${error.message}`);
+    console.error(`Could not parse BLOCKLIST: ${error.message}`);
   }
   return BLOCKLIST;
 }
 
-const matchers = compile(loadEntries());
+let matchers = compile(BLOCKLIST);
+let configured = null;
+
+/**
+ * Apply the deployment's BLOCKLIST variable. Called once per isolate with the
+ * raw variable value; a repeat call with the same value is a no-op.
+ */
+export function configureBlocklist(raw = null) {
+  const key = raw == null ? "" : String(raw);
+  if (configured === key) return;
+  configured = key;
+  matchers = compile(parseEntries(key));
+}
 
 function matches(host, matcher) {
   if (host === matcher.name) return !matcher.subdomainsOnly;
@@ -82,11 +94,11 @@ function escapeRegExp(value) {
  * check might not decode.
  */
 export function blockedHostPatterns() {
-  return matchers.map((matcher) =>
-    matcher.subdomainsOnly
-      ? new RegExp(`^.+\\.${escapeRegExp(matcher.name)}$`, "i")
-      : new RegExp(`^(?:.+\\.)?${escapeRegExp(matcher.name)}$`, "i")
-  );
+  return matchers.map((matcher) => {
+    const host = matcher.name.split(".").map(escapeRegExp).join("[.]");
+    const prefix = matcher.subdomainsOnly ? "^.+" : "^(?:.+)?";
+    return new RegExp(`${prefix}[.]${host}$`, "i");
+  });
 }
 
 /**

@@ -159,9 +159,13 @@ export function downstreamResponseHeaders(
     headers[lower] = value;
   }
 
+  // Workerd implements getSetCookie(); the fallback keeps a single cookie
+  // working on a runtime that has not caught up.
   const cookies = upstreamHeaders.getSetCookie
     ? upstreamHeaders.getSetCookie()
-    : [];
+    : upstreamHeaders.get("set-cookie")
+      ? [upstreamHeaders.get("set-cookie")]
+      : [];
   const rewritten = cookies
     .map((cookie) => rewriteSetCookie(cookie, targetUrl))
     .filter(Boolean);

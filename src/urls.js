@@ -10,11 +10,8 @@
 // /proxy/https/example.com/a/c.png in the browser itself, with no parsing on
 // our side, and client-side routers keep seeing the paths they expect.
 //
-// /?url=<target> is the entry point (an iframe src or a typed address);
-// server.js immediately turns it into the path form above.
-
-import net from "node:net";
-import dns from "node:dns/promises";
+// /?url=<target> is the entry point (an iframe src or a typed address); the
+// router immediately turns it into the path form above.
 
 export const PROXY_PREFIX = "/proxy/";
 
@@ -108,10 +105,20 @@ export function isBlockedHost(hostname) {
   return isBlockedIp(lower);
 }
 
+/** IPv4/IPv6 literal detection; 4, 6, or 0 for "not an IP address". */
+export function isIP(value) {
+  const text = String(value);
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(text)) {
+    return text.split(".").every((part) => Number(part) <= 255) ? 4 : 0;
+  }
+  if (text.includes(":")) return /^[0-9a-f:.%]+$/i.test(text) ? 6 : 0;
+  return 0;
+}
+
 export function isBlockedIp(value) {
-  const ipType = net.isIP(value);
+  const ipType = isIP(value);
   if (ipType === 6) {
-    const lower = value.toLowerCase();
+    const lower = String(value).toLowerCase();
     return (
       lower === "::1" ||
       lower === "::" ||
@@ -121,7 +128,7 @@ export function isBlockedIp(value) {
     );
   }
   if (ipType === 4) {
-    const [a, b] = value.split(".").map(Number);
+    const [a, b] = String(value).split(".").map(Number);
     return (
       a === 0 ||
       a === 10 ||
@@ -136,42 +143,17 @@ export function isBlockedIp(value) {
 }
 
 /**
- * Refuse to fetch private-network destinations, including hostnames that
- * resolve to private addresses.
+ * Refuse literal private-network destinations.
+ *
+ * The Node server also resolved every hostname and refused names that pointed at
+ * a private address. Workers has no resolver API, so that half cannot be
+ * reproduced here: the check below covers literal addresses and the reserved
+ * hostnames, and Cloudflare's own egress refuses private destinations for both
+ * fetch and connect().
  */
-// Hostname -> resolved verdict, so the guard does not re-resolve DNS on every
-// subresource of every page.
-const DNS_TTL_MS = 60_000;
-const DNS_CACHE_MAX = 1024;
-const dnsVerdicts = new Map();
-
-function rememberVerdict(host, ok) {
-  if (dnsVerdicts.size >= DNS_CACHE_MAX) {
-    dnsVerdicts.delete(dnsVerdicts.keys().next().value);
-  }
-  dnsVerdicts.set(host, { expires: Date.now() + DNS_TTL_MS, ok });
-}
-
 export async function assertPublicDestination(target) {
   const url = target instanceof URL ? target : new URL(String(target));
   if (isBlockedHost(url.hostname)) {
     throw new Error("That host is blocked to protect private networks.");
-  }
-  if (net.isIP(url.hostname)) return;
-
-  const host = url.hostname;
-  const cached = dnsVerdicts.get(host);
-  if (cached && cached.expires > Date.now()) {
-    if (!cached.ok) {
-      throw new Error("That host resolves to a private network address.");
-    }
-    return;
-  }
-
-  const addresses = await dns.lookup(host, { all: true, verbatim: true });
-  const ok = !addresses.some((entry) => isBlockedIp(entry.address));
-  rememberVerdict(host, ok);
-  if (!ok) {
-    throw new Error("That host resolves to a private network address.");
   }
 }

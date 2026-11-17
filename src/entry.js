@@ -1,3 +1,15 @@
+// Escaping for the entry screen, carried over from the Node server.
+
+export function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  })[char]);
+}
+
 // Entry screen, carried over from the Node server unchanged.
 
 // The default screen: the brand splash, then the one field this proxy exists

@@ -1,7 +1,7 @@
 // Which proxy engine serves which site.
 //
-// The routing table is data, not code: sites.json at the project root (override
-// the path with COMPAXY_SITES). Each entry names hosts and exactly one engine,
+// The routing table is data, not code: sites.json next to this file, bundled
+// into the Worker at deploy time. Each entry names hosts and exactly one engine,
 // because a site is served by one engine and one engine only - a routed site is
 // never retried on a different engine.
 //
@@ -11,15 +11,7 @@
 // entry matches subdomains only. Entries are tried in order, so put specific
 // hosts before broad ones.
 
-import { readFileSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-
-export const TABLE_PATH = process.env.COMPAXY_SITES
-  ? path.resolve(process.env.COMPAXY_SITES)
-  : path.join(HERE, "..", "sites.json");
+import tableData from "./sites.json";
 
 // Each engine's route is the prefix it serves proxied pages from, which is also
 // what the entry point redirects into.
@@ -61,16 +53,7 @@ function hostMatches(pattern, hostname) {
 }
 
 function loadTable() {
-  let raw;
-  try {
-    raw = JSON.parse(readFileSync(TABLE_PATH, "utf8"));
-  } catch (error) {
-    console.warn(
-      `Routing table ${TABLE_PATH} could not be read (${error.message}); ` +
-        `every site will use ${DEFAULT_ENGINE}.`
-    );
-    return { fallback: DEFAULT_ENGINE, entries: [], problem: error.message };
-  }
+  const raw = tableData;
 
   const fallback = ENGINES[raw?.default] ? raw.default : DEFAULT_ENGINE;
   if (raw?.default && raw.default !== fallback) {
