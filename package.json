@@ -1,0 +1,19 @@
+{
+  "name": "cf-compaxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Compaxy on Cloudflare Workers: base, Scramjet v2 and Ultraviolet, with Wisp served from the same Worker.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "spike": "node test/wisp-spike.mjs"
+  },
+  "dependencies": {
+    "ipaddr.js": "^2.5.0"
+  },
+  "devDependencies": {
+    "@mercuryworkshop/wisp-js": "^0.5.3",
+    "wrangler": "^4.18.0"
+  }
+}
