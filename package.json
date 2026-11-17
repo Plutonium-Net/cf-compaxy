@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Compaxy on Cloudflare Workers: base, Scramjet v2 and Ultraviolet, with Wisp served from the same Worker.",
   "scripts": {
-    "build": "wrangler deploy --dry-run --outdir dist",
+    "build": "npx --no-install wrangler deploy --dry-run",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "spike": "node test/wisp-spike.mjs"
