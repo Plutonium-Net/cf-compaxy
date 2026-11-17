@@ -119,10 +119,15 @@ Run against `wrangler dev` on this machine:
   `/scram/`, `/scram/sw.js`, `/uv/sw.js`, `/uv/uv.config.js` and both
   bootstrappers answer `200`.
 
-Not verified: the two service-worker engines booting in a real browser. That
-needs a browser at the Worker's origin to register the worker and open the Wisp
-socket; `wrangler dev` over `http://127.0.0.1` is a secure context, so it should
-work there, but it was not exercised.
+- **both service-worker engines, in a browser**: Scramjet v2 registered
+  `/scram/sw.js`, loaded `scramjet.wasm` and its controller, and served
+  `https://example.com/` at `/scram/<frame>/<codec>/https%3A%2F%2Fexample.com%2F`;
+  Ultraviolet registered `/uv/sw.js` and served the same site at
+  `/uv/service/...`. Both reached the site through this Worker's own Wisp
+  endpoint.
+
+Not verified: the same two engines on a deployed origin (only `wrangler dev` on
+`127.0.0.1` was exercised).
 
 ## Security
 

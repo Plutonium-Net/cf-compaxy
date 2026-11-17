@@ -418,7 +418,7 @@ async function loadBlockRules() {
 }
 
 function blockedMessageFor(hostname, rules) {
-  var host = String(hostname || '').toLowerCase().replace(/\\\\.+$/, '');
+    var host = String(hostname || '').toLowerCase().replace(/\\.+$/, '');
   for (var i = 0; i < rules.length; i++) {
     var rule = rules[i];
     if (host === rule.name) {
@@ -454,7 +454,7 @@ function targetOf(encoded) {
   for (var i = 0; i < parts.length; i++) {
     var value = parts[i];
     try { value = decodeURIComponent(value); } catch (error) { continue; }
-    if (/^https?:\\\\/\\\\//i.test(value)) return value;
+    if (/^https?:\\/\\//i.test(value)) return value;
   }
   return null;
 }
@@ -606,7 +606,7 @@ async function handle(event) {
   try {
     var encoded = new URL(event.request.url).pathname.slice(__uv$config.prefix.length);
     var target = __uv$config.decodeUrl(decodeURIComponent(encoded));
-    if (/^https?:\\\\/\\\\//i.test(target)) {
+    if (/^https?:\\/\\//i.test(target)) {
       blocked = blockedMessageFor(new URL(target).hostname, await loadBlockRules());
     }
   } catch (error) {
