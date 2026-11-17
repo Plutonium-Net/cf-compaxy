@@ -77,10 +77,14 @@ new version of the package and re-link the two files above.
 
 ### Caps and what they mean
 
-- **6 streams per session and 6 per host.** Workers allow six simultaneous
-  outbound connections per request, and a Wisp session is one request. This is
-  also why the transport is fine for browsing but not for anything that wants
-  many parallel connections.
+- **Six open sockets per session, and the rest queue.** Workers allow six
+  simultaneous outbound connections per request, and a Wisp session is one
+  request. Refusing the seventh reaches the browser as a TLS failure in the
+  middle of a handshake, so `src/wisp/server/net.mjs` holds a six-slot semaphore
+  instead and the excess waits: a page asking for 200 subresources loads
+  six-at-a-time instead of losing most of them. A stream that waits more than
+  30 s for a slot fails rather than hanging, and `/healthz` reports
+  `transport.active` / `transport.waiting`.
 - **TCP only.** `connect()` has no UDP, so the UDP extension is not advertised
   and a client that asks for one is refused.
 - **Private and loopback ranges are refused**, and the blocklist is wired into
