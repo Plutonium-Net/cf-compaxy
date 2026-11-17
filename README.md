@@ -77,13 +77,16 @@ new version of the package and re-link the two files above.
 
 ### Caps and what they mean
 
-- **Six open sockets per session, and the rest queue.** Workers allow six
+- **Six open sockets per session, and the rest queue.** The budget is per
+  session, not per isolate: each visitor gets its own six, so one page pinning
+  every slot cannot stall anyone else. Workers allow six
   simultaneous outbound connections per request, and a Wisp session is one
   request. Refusing the seventh reaches the browser as a TLS failure in the
   middle of a handshake, so `src/wisp/server/net.mjs` holds a six-slot semaphore
   instead and the excess waits: a page asking for 200 subresources loads
   six-at-a-time instead of losing most of them. A stream that waits more than
   30 s for a slot fails rather than hanging, and `/healthz` reports
+  `transport.scope`, `transport.sessions`, and the summed
   `transport.active` / `transport.waiting`.
 - **TCP only.** `connect()` has no UDP, so the UDP extension is not advertised
   and a client that asks for one is refused.

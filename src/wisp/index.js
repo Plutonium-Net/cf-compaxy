@@ -11,6 +11,7 @@
 
 import { ServerConnection } from "./server/connection.mjs";
 import { options } from "./server/options.mjs";
+import { StreamSlots, sessionSocketClass } from "./server/net.mjs";
 
 export { options };
 
@@ -43,9 +44,14 @@ export function handleWispUpgrade(request, pathname, ctx, wispOptions = {}) {
   const [client, server] = Object.values(new WebSocketPair());
   server.accept();
 
+  // One budget of six sockets per session: the platform's per-request cap,
+  // scoped so a busy visitor cannot consume another visitor's connections.
+  const slots = new StreamSlots();
+
   const connection = new ServerConnection(server, pathname, {
     ...wispOptions,
-    wisp_version: version
+    wisp_version: version,
+    TCPSocket: sessionSocketClass(slots)
   });
 
   // setup() performs the handshake (and, for v2, the INFO exchange); run()
@@ -62,6 +68,9 @@ export function handleWispUpgrade(request, pathname, ctx, wispOptions = {}) {
         } catch {
           /* already closed */
         }
+      } finally {
+        // Nothing may wait on a budget whose session is gone.
+        slots.dispose();
       }
     })()
   );
