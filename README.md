@@ -3,6 +3,12 @@
 Compaxy on Cloudflare Workers: three proxy engines behind one origin, with the
 Wisp transport served from the same Worker.
 
+Credit:
+MercuryWorkshop/wisp-server-workers: INSPIRED Wisp protocol on Cloudflare Workers.
+Obviously Mercury Workshop for Wisp
+Titanium Network for SJ v2 and UV
+The (second) sexiest agentic AI Freebuff.
+
 ```text
 iframe / browser  ->  this Worker  ->  one of three engines  ->  upstream site
    ?url=...            routing table
