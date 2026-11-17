@@ -6,7 +6,9 @@
 //
 //     node test/wisp-spike.mjs [ws://127.0.0.1:8787/wisp/test/]
 
-import { ClientConnection } from "@mercuryworkshop/wisp-js/client";
+import { client } from "@mercuryworkshop/wisp-js/client";
+
+const { ClientConnection } = client;
 
 const endpoint = process.argv[2] || "ws://127.0.0.1:8787/wisp/test/";
 const target = process.argv[3] || "example.com";
