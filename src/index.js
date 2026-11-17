@@ -46,13 +46,18 @@ import {
 } from "./pages.js";
 import { entryPage } from "./entry.js";
 import { handleWispUpgrade, options as wispOptions } from "./wisp/index.js";
+import { transportStats } from "./wisp/server/net.mjs";
 
-// Wisp defaults. The stream caps follow the platform: Workers allow six
-// simultaneous outbound connections per request, and a Wisp session is one
-// request. UDP is refused because connect() is TCP only, and the private and
-// loopback ranges stay refused exactly as the Node server refused them.
-wispOptions.stream_limit_total = 6;
-wispOptions.stream_limit_per_host = 6;
+// Wisp defaults. UDP is refused because connect() is TCP only, and the private
+// and loopback ranges stay refused exactly as the Node server refused them.
+//
+// The stream limits are deliberately -1 (unlimited): refusing a stream reaches
+// the browser as a TLS failure mid-handshake, and a page like YouTube asks for
+// hundreds of connections at once. src/wisp/server/net.mjs queues them instead,
+// holding at most six sockets open - the platform's per-request ceiling - so a
+// page loads six-at-a-time rather than losing most of its subresources.
+wispOptions.stream_limit_total = -1;
+wispOptions.stream_limit_per_host = -1;
 wispOptions.allow_udp_streams = false;
 wispOptions.allow_private_ips = false;
 wispOptions.allow_loopback_ips = false;
@@ -139,7 +144,8 @@ export default {
         runtime: "cloudflare-workers",
         engines: ENGINE_IDS,
         defaultEngine: defaultEngine().id,
-        cache: cacheStatsNow
+        cache: cacheStatsNow,
+        transport: transportStats()
       });
     }
 

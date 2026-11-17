@@ -16,8 +16,7 @@ import * as logging from "../logging.mjs";
 import { AsyncQueue } from "../websocket.mjs";
 
 // `is_node` drives upstream's Node-only paths. The socket classes below are the
-// real implementation, so the flag is false: it keeps upstream's own node:net
-// wrappers out of the way.
+// real implementation, so the flag is false.
 export const is_node = false;
 
 export function assert_on_node() {}
@@ -40,6 +39,59 @@ export async function lookup_ip(hostname) {
   return hostname;
 }
 
+// ---- concurrency -----------------------------------------------------------
+//
+// A Worker may hold six simultaneous outbound connections per request, and one
+// Wisp session is one request. Refusing the seventh stream (what the stream
+// limit options do) reaches the browser as a TLS failure in the middle of a
+// handshake - a page with 200 subresources loses almost all of them. So streams
+// wait for a slot instead: the page loads six-at-a-time rather than failing.
+//
+// The slot is held for the life of the TCP socket and returned when it closes,
+// on any path - finished, refused, errored or timed out.
+
+const MAX_CONCURRENT_STREAMS = 6;
+const SLOT_TIMEOUT_MS = 30_000;
+
+let activeSlots = 0;
+const slotWaiters = [];
+
+function acquireSlot() {
+  if (activeSlots < MAX_CONCURRENT_STREAMS) {
+    activeSlots++;
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => {
+    const waiter = { resolve, timer: null };
+    waiter.timer = setTimeout(() => {
+      const index = slotWaiters.indexOf(waiter);
+      if (index >= 0) slotWaiters.splice(index, 1);
+      resolve(false);
+    }, SLOT_TIMEOUT_MS);
+    slotWaiters.push(waiter);
+  });
+}
+
+function releaseSlot() {
+  const waiter = slotWaiters.shift();
+  if (waiter) {
+    // Hand the slot straight over: the count does not change.
+    clearTimeout(waiter.timer);
+    waiter.resolve(true);
+    return;
+  }
+  if (activeSlots > 0) activeSlots--;
+}
+
+/** Occupancy, for /healthz. */
+export function transportStats() {
+  return {
+    active: activeSlots,
+    waiting: slotWaiters.length,
+    limit: MAX_CONCURRENT_STREAMS
+  };
+}
+
 /**
  * A TCP destination, addressed the way upstream expects: `connect(ip)`, then
  * `recv()`, `send(data)`, `close()`, and pause/resume for backpressure.
@@ -60,21 +112,42 @@ export class NodeTCPSocket {
     this.connected = false;
     this.closed = false;
     this.wake = null;
+    this.hasSlot = false;
     this.data_queue = new AsyncQueue(this.recv_buffer_size);
   }
 
   async connect(ip_override = null) {
-    const hostname = ip_override || this.hostname;
-    this.socket = connect({ hostname, port: this.port });
-    await this.socket.opened;
-    this.connected = true;
+    const granted = await acquireSlot();
+    if (!granted) {
+      throw new Error(
+        `timed out after ${SLOT_TIMEOUT_MS}ms waiting for a transport slot`
+      );
+    }
+    this.hasSlot = true;
 
-    this.writer = this.socket.writable.getWriter();
-    this.reader = this.socket.readable.getReader();
-    // The read loop outlives the connect() call, so it is not awaited here.
-    this.pump().catch((error) => {
-      logging.debug(`tcp read loop for ${this.hostname} ended: ${error}`);
-    });
+    try {
+      const hostname = ip_override || this.hostname;
+      this.socket = connect({ hostname, port: this.port });
+      await this.socket.opened;
+      this.connected = true;
+
+      this.writer = this.socket.writable.getWriter();
+      this.reader = this.socket.readable.getReader();
+      // The read loop outlives the connect() call, so it is not awaited here.
+      this.pump().catch((error) => {
+        logging.debug(`tcp read loop for ${this.hostname} ended: ${error}`);
+      });
+    } catch (error) {
+      this.release();
+      throw error;
+    }
+  }
+
+  /** Return the concurrency slot. Idempotent. */
+  release() {
+    if (!this.hasSlot) return;
+    this.hasSlot = false;
+    releaseSlot();
   }
 
   async pump() {
@@ -95,6 +168,7 @@ export class NodeTCPSocket {
     } finally {
       this.closed = true;
       this.data_queue.close();
+      this.release();
     }
   }
 
@@ -109,7 +183,10 @@ export class NodeTCPSocket {
   }
 
   async close() {
-    if (this.closed && !this.writer) return;
+    if (this.closed && !this.writer && !this.socket) {
+      this.release();
+      return;
+    }
     this.closed = true;
     this.data_queue.close();
     try {
@@ -130,6 +207,7 @@ export class NodeTCPSocket {
     this.reader = null;
     this.writer = null;
     this.socket = null;
+    this.release();
   }
 
   pause() {
