@@ -86,7 +86,11 @@ new version of the package and re-link the two files above.
   instead and the excess waits: a page asking for 200 subresources loads
   six-at-a-time instead of losing most of them. There is no slot deadline: a stream waits as long
   as it takes, and is dropped from the queue when the browser abandons its
-  request, so waiting never turns into a failure. `/healthz` reports
+  request, so waiting never turns into a failure. Two guards keep the
+  queue honest: a waiter that has carried no byte for 90 s is pruned as
+  abandoned, so it cannot take a slot later for nobody, and the queue is capped
+  at 128 per session - past that a new stream is refused immediately rather
+  than parked. `/healthz` reports
   `transport.scope`, `transport.sessions`, and the summed
   `transport.active` / `transport.waiting`.
 - **TCP only.** `connect()` has no UDP, so the UDP extension is not advertised

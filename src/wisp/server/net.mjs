@@ -53,51 +53,93 @@ export async function lookup_ip(hostname) {
 // failure later. A page with 20 origins therefore loads six-at-a-time instead
 // of losing the ones that did not arrive first.
 //
-// The wait ends one of three ways, and the slot is held only for the life of the
-// socket:
-//   - a slot frees, the socket connects, and the slot returns when it closes;
-//   - the browser abandons the request, and the queued waiter is dropped (see
-//     `cancel`, called from `close()`) so nothing leaks or connects for a dead
-//     stream;
-//   - the session ends and `dispose()` releases everyone still waiting.
+// Two guards keep the queue itself from becoming the problem:
+//
+//   - QUIET waiters are pruned. A queued stream that has carried no byte for
+//     QUIET_WAIT_MS is a request the browser has abandoned, so it leaves the
+//     queue instead of taking a slot later for nobody. A sweep runs while the
+//     queue is non-empty.
+//   - The queue is CAPPED at MAX_WAITING. Past that, a new stream is told so
+//     immediately rather than parked; the page has more outstanding requests
+//     than it could ever satisfy over six sockets anyway.
+//
+// The wait ends one of four ways, and a slot is held only for the life of the
+// socket: it frees and the socket connects; the browser abandons the stream and
+// `cancel` drops it; the sweep prunes it as quiet; or the session's `dispose`
+// releases everyone still waiting.
 
 const DEFAULT_SESSION_SLOTS = 6;
+const MAX_WAITING = 128;
+const QUIET_WAIT_MS = 90_000;
+const SWEEP_MS = 15_000;
 
 // Live pools, so /healthz can report the whole isolate without reaching into a
 // session that has already ended.
 const livePools = new Set();
 
 export class StreamSlots {
-  constructor(limit = DEFAULT_SESSION_SLOTS, { register = true } = {}) {
+  constructor(
+    limit = DEFAULT_SESSION_SLOTS,
+    { maxWaiting = MAX_WAITING, register = true } = {}
+  ) {
     this.limit = limit;
+    this.maxWaiting = maxWaiting;
     this.active = 0;
     this.waiters = [];
     this.disposed = false;
+    this.sweepTimer = null;
     if (register) livePools.add(this);
   }
 
   /**
-   * Resolve true with a slot, false when this wait was cancelled (the stream
-   * closed) or the session ended. There is deliberately no time limit.
+   * Resolve with the reason this socket has (or has not) a slot:
+   * `granted`, `full`, `closed`, `quiet` or `session-ended`.
    */
   acquire(socket) {
-    if (this.disposed) return Promise.resolve(false);
+    if (this.disposed) return Promise.resolve("session-ended");
     if (this.active < this.limit) {
       this.active++;
-      return Promise.resolve(true);
+      return Promise.resolve("granted");
     }
+    if (this.waiters.length >= this.maxWaiting) return Promise.resolve("full");
+
     return new Promise((resolve) => {
       this.waiters.push({ socket, resolve });
+      this.scheduleSweep();
     });
   }
 
   /** Drop a waiter whose stream closed before it reached the front. */
-  cancel(socket) {
+  cancel(socket, reason = "closed") {
     const index = this.waiters.findIndex((waiter) => waiter.socket === socket);
     if (index === -1) return false;
     const [waiter] = this.waiters.splice(index, 1);
-    waiter.resolve(false);
+    waiter.resolve(reason);
     return true;
+  }
+
+  /** Prune waiters that have carried no byte for QUIET_WAIT_MS. */
+  pruneQuiet(now = Date.now()) {
+    let pruned = 0;
+    for (const waiter of [...this.waiters]) {
+      const quietFor = now - (waiter.socket.lastActivity || 0);
+      if (quietFor >= QUIET_WAIT_MS && this.cancel(waiter.socket, "quiet")) {
+        pruned++;
+      }
+    }
+    if (pruned) {
+      logging.debug(`(${pruned}) quiet queued streams pruned`);
+    }
+    return pruned;
+  }
+
+  scheduleSweep() {
+    if (this.sweepTimer || this.disposed || this.waiters.length === 0) return;
+    this.sweepTimer = setTimeout(() => {
+      this.sweepTimer = null;
+      this.pruneQuiet();
+      this.scheduleSweep();
+    }, SWEEP_MS);
   }
 
   release() {
@@ -105,7 +147,7 @@ export class StreamSlots {
     const waiter = this.waiters.shift();
     if (waiter) {
       // Hand the slot straight over: the count does not change.
-      waiter.resolve(true);
+      waiter.resolve("granted");
       return;
     }
     if (this.active > 0) this.active--;
@@ -115,7 +157,8 @@ export class StreamSlots {
     return {
       limit: this.limit,
       active: this.active,
-      waiting: this.waiters.length
+      waiting: this.waiters.length,
+      maxWaiting: this.maxWaiting
     };
   }
 
@@ -123,7 +166,11 @@ export class StreamSlots {
   dispose() {
     this.disposed = true;
     livePools.delete(this);
-    for (const waiter of this.waiters.splice(0)) waiter.resolve(false);
+    if (this.sweepTimer) {
+      clearTimeout(this.sweepTimer);
+      this.sweepTimer = null;
+    }
+    for (const waiter of this.waiters.splice(0)) waiter.resolve("session-ended");
   }
 }
 
@@ -142,6 +189,8 @@ export function transportStats() {
   return {
     scope: "session",
     limitPerSession: DEFAULT_SESSION_SLOTS,
+    maxWaitingPerSession: MAX_WAITING,
+    quietWaitMs: QUIET_WAIT_MS,
     sessions: livePools.size,
     active,
     waiting
@@ -171,6 +220,8 @@ export class NodeTCPSocket {
     this.wake = null;
     this.hasSlot = false;
     this.queued = false;
+    // Read by the queue sweep: a stream with traffic is not abandoned.
+    this.lastActivity = Date.now();
     this.data_queue = new AsyncQueue(this.recv_buffer_size);
   }
 
@@ -180,12 +231,10 @@ export class NodeTCPSocket {
 
   async connect(ip_override = null) {
     this.queued = true;
-    const granted = await this.pool.acquire(this);
+    const outcome = await this.pool.acquire(this);
     this.queued = false;
-    if (!granted) {
-      // Either the browser gave up on this stream or the session ended; either
-      // way there is nothing left to connect for.
-      throw new Error("stream closed while queued for a connection slot");
+    if (outcome !== "granted") {
+      throw new Error(`no connection slot for ${this.hostname}: ${outcome}`);
     }
     this.hasSlot = true;
 
@@ -194,6 +243,7 @@ export class NodeTCPSocket {
       this.socket = connect({ hostname, port: this.port });
       await this.socket.opened;
       this.connected = true;
+      this.lastActivity = Date.now();
 
       this.writer = this.socket.writable.getWriter();
       this.reader = this.socket.readable.getReader();
@@ -225,7 +275,10 @@ export class NodeTCPSocket {
         }
         const { value, done } = await this.reader.read();
         if (done) break;
-        if (value) await this.data_queue.put(new Uint8Array(value));
+        if (value) {
+          this.lastActivity = Date.now();
+          await this.data_queue.put(new Uint8Array(value));
+        }
       }
     } catch (error) {
       logging.debug(`tcp stream to ${this.hostname} ended with error - ${error}`);
@@ -242,6 +295,7 @@ export class NodeTCPSocket {
 
   async send(data) {
     if (!this.writer) throw new Error("tcp socket is not connected");
+    this.lastActivity = Date.now();
     await this.writer.ready;
     await this.writer.write(data);
   }
@@ -249,7 +303,7 @@ export class NodeTCPSocket {
   async close() {
     // A stream the browser abandoned while it was still queued must leave the
     // queue, or it would later take a slot for a request nobody is waiting for.
-    if (this.queued) this.pool.cancel(this);
+    if (this.queued) this.pool.cancel(this, "closed");
 
     if (this.closed && !this.writer && !this.socket) {
       this.release();
