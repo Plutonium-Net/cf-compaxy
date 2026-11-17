@@ -84,8 +84,9 @@ new version of the package and re-link the two files above.
   request. Refusing the seventh reaches the browser as a TLS failure in the
   middle of a handshake, so `src/wisp/server/net.mjs` holds a six-slot semaphore
   instead and the excess waits: a page asking for 200 subresources loads
-  six-at-a-time instead of losing most of them. A stream that waits more than
-  30 s for a slot fails rather than hanging, and `/healthz` reports
+  six-at-a-time instead of losing most of them. There is no slot deadline: a stream waits as long
+  as it takes, and is dropped from the queue when the browser abandons its
+  request, so waiting never turns into a failure. `/healthz` reports
   `transport.scope`, `transport.sessions`, and the summed
   `transport.active` / `transport.waiting`.
 - **TCP only.** `connect()` has no UDP, so the UDP extension is not advertised

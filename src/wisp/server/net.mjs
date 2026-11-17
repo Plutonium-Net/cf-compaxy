@@ -47,19 +47,24 @@ export async function lookup_ip(hostname) {
 // session's socket class below, so a page hammering its own six slots cannot
 // starve anyone else's session.
 //
-// Refusing the seventh stream (what the stream limit options do) reaches the
-// browser as a TLS failure in the middle of a handshake - a page with 200
-// subresources loses almost all of them. So streams wait for a slot instead:
-// its own page loads six-at-a-time rather than failing.
+// The seventh stream waits for a slot rather than being refused, and it waits
+// for as long as it takes: a refusal reaches the browser as a TLS failure in the
+// middle of a handshake, and a deadline only converts waiting into that same
+// failure later. A page with 20 origins therefore loads six-at-a-time instead
+// of losing the ones that did not arrive first.
 //
-// The slot is held for the life of the TCP socket and returned when it closes,
-// on any path - finished, refused, errored or timed out.
+// The wait ends one of three ways, and the slot is held only for the life of the
+// socket:
+//   - a slot frees, the socket connects, and the slot returns when it closes;
+//   - the browser abandons the request, and the queued waiter is dropped (see
+//     `cancel`, called from `close()`) so nothing leaks or connects for a dead
+//     stream;
+//   - the session ends and `dispose()` releases everyone still waiting.
 
 const DEFAULT_SESSION_SLOTS = 6;
-const SLOT_TIMEOUT_MS = 30_000;
 
-// Live pools, so /healthz can report the whole isolate without being able to
-// reach into a session that has already ended.
+// Live pools, so /healthz can report the whole isolate without reaching into a
+// session that has already ended.
 const livePools = new Set();
 
 export class StreamSlots {
@@ -71,22 +76,28 @@ export class StreamSlots {
     if (register) livePools.add(this);
   }
 
-  /** Resolve true with a slot, or false when it could not be had in time. */
-  acquire() {
+  /**
+   * Resolve true with a slot, false when this wait was cancelled (the stream
+   * closed) or the session ended. There is deliberately no time limit.
+   */
+  acquire(socket) {
     if (this.disposed) return Promise.resolve(false);
     if (this.active < this.limit) {
       this.active++;
       return Promise.resolve(true);
     }
     return new Promise((resolve) => {
-      const waiter = { resolve, timer: null };
-      waiter.timer = setTimeout(() => {
-        const index = this.waiters.indexOf(waiter);
-        if (index >= 0) this.waiters.splice(index, 1);
-        resolve(false);
-      }, SLOT_TIMEOUT_MS);
-      this.waiters.push(waiter);
+      this.waiters.push({ socket, resolve });
     });
+  }
+
+  /** Drop a waiter whose stream closed before it reached the front. */
+  cancel(socket) {
+    const index = this.waiters.findIndex((waiter) => waiter.socket === socket);
+    if (index === -1) return false;
+    const [waiter] = this.waiters.splice(index, 1);
+    waiter.resolve(false);
+    return true;
   }
 
   release() {
@@ -94,7 +105,6 @@ export class StreamSlots {
     const waiter = this.waiters.shift();
     if (waiter) {
       // Hand the slot straight over: the count does not change.
-      clearTimeout(waiter.timer);
       waiter.resolve(true);
       return;
     }
@@ -113,10 +123,7 @@ export class StreamSlots {
   dispose() {
     this.disposed = true;
     livePools.delete(this);
-    for (const waiter of this.waiters.splice(0)) {
-      clearTimeout(waiter.timer);
-      waiter.resolve(false);
-    }
+    for (const waiter of this.waiters.splice(0)) waiter.resolve(false);
   }
 }
 
@@ -163,6 +170,7 @@ export class NodeTCPSocket {
     this.closed = false;
     this.wake = null;
     this.hasSlot = false;
+    this.queued = false;
     this.data_queue = new AsyncQueue(this.recv_buffer_size);
   }
 
@@ -171,11 +179,13 @@ export class NodeTCPSocket {
   }
 
   async connect(ip_override = null) {
-    const granted = await this.pool.acquire();
+    this.queued = true;
+    const granted = await this.pool.acquire(this);
+    this.queued = false;
     if (!granted) {
-      throw new Error(
-        `timed out after ${SLOT_TIMEOUT_MS}ms waiting for a connection slot`
-      );
+      // Either the browser gave up on this stream or the session ended; either
+      // way there is nothing left to connect for.
+      throw new Error("stream closed while queued for a connection slot");
     }
     this.hasSlot = true;
 
@@ -237,6 +247,10 @@ export class NodeTCPSocket {
   }
 
   async close() {
+    // A stream the browser abandoned while it was still queued must leave the
+    // queue, or it would later take a slot for a request nobody is waiting for.
+    if (this.queued) this.pool.cancel(this);
+
     if (this.closed && !this.writer && !this.socket) {
       this.release();
       return;
