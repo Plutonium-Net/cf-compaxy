@@ -77,22 +77,22 @@ new version of the package and re-link the two files above.
 
 ### Caps and what they mean
 
-- **Six open sockets per session, and the rest queue.** The budget is per
-  session, not per isolate: each visitor gets its own six, so one page pinning
-  every slot cannot stall anyone else. Workers allow six
-  simultaneous outbound connections per request, and a Wisp session is one
-  request. Refusing the seventh reaches the browser as a TLS failure in the
-  middle of a handshake, so `src/wisp/server/net.mjs` holds a six-slot semaphore
-  instead and the excess waits: a page asking for 200 subresources loads
-  six-at-a-time instead of losing most of them. There is no slot deadline: a stream waits as long
-  as it takes, and is dropped from the queue when the browser abandons its
-  request, so waiting never turns into a failure. Two guards keep the
-  queue honest: a waiter that has carried no byte for 90 s is pruned as
-  abandoned, so it cannot take a slot later for nobody, and the queue is capped
-  at 128 per session - past that a new stream is refused immediately rather
-  than parked. `/healthz` reports
-  `transport.scope`, `transport.sessions`, and the summed
-  `transport.active` / `transport.waiting`.
+- **Six simultaneous dials per session, and the rest queue.** Cloudflare's
+  2026-04-09 changelog relaxed the six-connection limit so it only counts
+  connections still waiting for a server's first response, so the budget in
+  `src/wisp/server/net.mjs` covers the dial rather than the socket: a slot
+  returns as `connect()` opens and an established socket costs nothing. That is
+  measured, not assumed - holding the slot until close serialised a BBC load to
+  13.3 s, while releasing it at open gave 2.0 s with no additional failed
+  subresources. The budget is per session, not per isolate, so one visitor cannot
+  starve another, and a stream that finds the six busy waits instead of being
+  refused: a refusal reaches the browser as a TLS failure in the middle of a
+  handshake. Two guards keep the queue honest: a waiter that has carried no byte
+  for 90 s is pruned as abandoned, so it cannot take a slot later for nobody, and
+  the queue is capped at 128 per session - past that a new stream is refused
+  immediately rather than parked. `/healthz` reports `transport.scope`,
+  `transport.sessions`, and the summed `transport.active` / `transport.waiting`
+  dials.
 - **TCP only.** `connect()` has no UDP, so the UDP extension is not advertised
   and a client that asks for one is refused.
 - **Private and loopback ranges are refused**, and the blocklist is wired into

@@ -41,11 +41,17 @@ export async function lookup_ip(hostname) {
 
 // ---- concurrency -----------------------------------------------------------
 //
-// A Worker may hold six simultaneous outbound connections in one request, and
-// one Wisp session is one request. The cap is therefore per session, not per
-// isolate: `StreamSlots` is one visitor's budget of six sockets, handed to the
-// session's socket class below, so a page hammering its own six slots cannot
-// starve anyone else's session.
+// A Worker may have six connections at once still waiting for a server's first
+// response, and one Wisp session is one request. The cap is therefore per
+// session, not per isolate, and it is a budget of DIALS rather than sockets:
+// `StreamSlots` is one visitor's six simultaneous handshakes, handed to the
+// session's socket class below, so a page cannot starve anyone else's session.
+//
+// A slot runs from the dial until the socket opens, not for the socket's life.
+// Cloudflare's 2026-04-09 changelog relaxed the six-connection limit so it only
+// constrains connections still waiting for a response, and production agreed:
+// holding the slot until close serialised BBC to 13.3 s, while releasing it at
+// open gave 2.0 s with the same subresources failing.
 //
 // The seventh stream waits for a slot rather than being refused, and it waits
 // for as long as it takes: a refusal reaches the browser as a TLS failure in the
@@ -63,10 +69,10 @@ export async function lookup_ip(hostname) {
 //     immediately rather than parked; the page has more outstanding requests
 //     than it could ever satisfy over six sockets anyway.
 //
-// The wait ends one of four ways, and a slot is held only for the life of the
-// socket: it frees and the socket connects; the browser abandons the stream and
-// `cancel` drops it; the sweep prunes it as quiet; or the session's `dispose`
-// releases everyone still waiting.
+// The wait ends one of four ways, and a slot is held only for the dial: it frees
+// and the socket connects; the browser abandons the stream and `cancel` drops it;
+// the sweep prunes it as quiet; or the session's `dispose` releases everyone
+// still waiting.
 
 const DEFAULT_SESSION_SLOTS = 6;
 const MAX_WAITING = 128;
@@ -192,6 +198,7 @@ export function transportStats() {
     maxWaitingPerSession: MAX_WAITING,
     quietWaitMs: QUIET_WAIT_MS,
     sessions: livePools.size,
+    metered: "connect dials",
     active,
     waiting
   };
@@ -242,19 +249,27 @@ export class NodeTCPSocket {
       const hostname = ip_override || this.hostname;
       this.socket = connect({ hostname, port: this.port });
       await this.socket.opened;
-      this.connected = true;
-      this.lastActivity = Date.now();
-
-      this.writer = this.socket.writable.getWriter();
-      this.reader = this.socket.readable.getReader();
-      // The read loop outlives the connect() call, so it is not awaited here.
-      this.pump().catch((error) => {
-        logging.debug(`tcp read loop for ${this.hostname} ended: ${error}`);
-      });
-    } catch (error) {
+    } finally {
+      // The platform meters a connection only while it waits for the server to
+      // answer, so the slot goes back as the socket opens. Established sockets
+      // are not counted: measured in production, holding the slot for the
+      // socket's whole life made a BBC load take 13.3 s instead of 2.0 s, and
+      // releasing it here failed no additional subresources.
       this.release();
-      throw error;
     }
+
+    if (this.closed) {
+      throw new Error(`stream closed while connecting to ${this.hostname}`);
+    }
+
+    this.connected = true;
+    this.lastActivity = Date.now();
+    this.writer = this.socket.writable.getWriter();
+    this.reader = this.socket.readable.getReader();
+    // The read loop outlives the connect() call, so it is not awaited here.
+    this.pump().catch((error) => {
+      logging.debug(`tcp read loop for ${this.hostname} ended: ${error}`);
+    });
   }
 
   /** Return the concurrency slot to this session. Idempotent. */
